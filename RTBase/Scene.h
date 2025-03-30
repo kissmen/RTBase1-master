@@ -79,6 +79,9 @@ public:
 	BVHNode* bvh = NULL;
 	Camera camera;
 	AABB bounds;
+	std::vector<float> lightCDF;       // 每个光源的前缀CDF
+	float totalLightPower = 0.0f;      // 所有光源的能量和
+	bool builtLightCDF = false;        // 是否已建立CDF
 
 	void build()
 	{
@@ -133,11 +136,64 @@ public:
 	Light* sampleLight(Sampler* sampler, float& pmf)
 	{
 		// Select light source and calculate its probability mass function
-		if (lights.empty()) return nullptr;
+		/*if (lights.empty()) return nullptr;
 		float r1 = sampler->next();
 		pmf = 1.0f / (float)lights.size();
 		int index = std::min((int)(r1 * lights.size()), (int)(lights.size() - 1));
+		return lights[index];*/
+		// 若还没build，先build
+		if (!builtLightCDF) {
+			buildLightPowerCDF();
+			builtLightCDF = true;
+		}
+		if (lights.empty()) {
+			pmf = 1.0f;
+			return nullptr;
+		}
+
+		float r = sampler->next();
+		// 找到CDF中 >= r 的第一个位置
+		int index = binarySearchLightCDF(r);
+		// 计算 pmf
+		// 先计算这个光源的power
+		float power_i = (index == 0) ? (lightCDF[0] * totalLightPower)
+			: ((lightCDF[index] - lightCDF[index - 1]) * totalLightPower);
+		pmf = power_i / totalLightPower;
+
+		// 返回光源
 		return lights[index];
+	}
+	void buildLightPowerCDF()
+	{
+		lightCDF.resize(lights.size());
+		// 累加
+		float accum = 0.0f;
+		for (int i = 0; i < lights.size(); i++) {
+			float pwr = lights[i]->totalIntegratedPower();
+			accum += pwr;
+			lightCDF[i] = accum;
+		}
+		totalLightPower = accum;
+		// 归一化
+		for (int i = 0; i < lights.size(); i++) {
+			lightCDF[i] /= totalLightPower;
+		}
+	}
+
+	// 二分查找
+	int binarySearchLightCDF(float r)
+	{
+		int left = 0;
+		int right = (int)lightCDF.size() - 1;
+		while (left < right)
+		{
+			int mid = (left + right) >> 1;
+			if (lightCDF[mid] < r)
+				left = mid + 1;
+			else
+				right = mid;
+		}
+		return left;
 	}
 
 	// Do not modify any code below this line

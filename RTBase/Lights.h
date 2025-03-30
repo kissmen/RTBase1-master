@@ -74,6 +74,7 @@ public:
 		frame.fromVector(triangle->gNormal());
 		return frame.toWorld(wi);
 	}
+
 };
 
 class BackgroundColour : public Light
@@ -207,64 +208,56 @@ public:
 			marginalDist[y] /= totalEnv;
 		}
 	}
+	// 采样函数，基于累积分布函数（CDF）采样环境贴图中的一个方向
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
 	{
-		// Assignment: Update this code to importance sampling lighting based on luminance of each pixel
-		// 1) 先在 marginalDist 上二分找行(即θ方向)
+		// 1) 从 marginalDist 中采样经度（θ方向）
 		float r1 = sampler->next();
 		int row = binarySearchSegment(marginalDist.data(), H, r1);
 
-		// 取得前一行CDF值 (做局部比率)
+		// 计算该行的CDF范围
 		float cdfBelow = (row == 0) ? 0.0f : marginalDist[row - 1];
 		float rowCDFRange = marginalDist[row] - cdfBelow;
 		float rowCDFLocal = (r1 - cdfBelow) / std::max(rowCDFRange, 1e-8f);
 
-		// 2) 在 conditionalDist[row] 上二分找列(即φ方向)
+		// 2) 在该行中，采样纬度（φ方向）
 		float r2 = sampler->next();
-		// 该行cdf起始位置
-		int rowStart = row * W;
-		int col = binarySearchSegment(&conditionalDist[rowStart], W, r2);
+		int col = binarySearchSegment(&conditionalDist[row * W], W, r2);
 
-		// 同理可做更精确插值，这里做简单离散
-		// 3) 得到(u,v)
+		// 3) 转换为球面坐标系
 		float u = ((float)col + 0.5f) / (float)W;
 		float v = ((float)row + 0.5f) / (float)H;
-
-		// 4) 转成球面方向 (theta = v*pi, phi = u*2pi)
 		float theta = v * M_PI;
 		float phi = u * 2.0f * M_PI;
+
+		// 球面坐标转换
 		float sinT = sinf(theta);
 		float cosT = cosf(theta);
-
-		// 让 x=sinT*cosφ, y=cosT, z=sinT*sinφ
 		Vec3 dir = Vec3(sinT * cosf(phi), cosT, sinT * sinf(phi));
 
-		// 5) 读贴图
+		// 4) 评估颜色值
 		reflectedColour = evaluate(dir);
 
-		// 6) pdf = [像素能量 / totalEnv] * [W*H / (2π²)] 
-		//    你在 buildDistribution 里把 (lum * sinθ) 总和记为 totalEnv
-		//    pixelEnergy = (lum(x,y) * sinθ)
-		//    这里 row,col 对应 
+		// 5) 计算该方向的PDF
 		float pixelLum = env->texels[row * W + col].Lum();
 		float pixelValue = pixelLum * sinT;
 		float localProb = pixelValue / totalEnv;
-		// “pixel -> direction”转换大约乘 (W*H)/(2π²)
-		// 原理：cdf 累加了 (lum*sinθ) over the sphere
-		// 具体公式可再优化，这里示例表达
 		pdf = localProb * ((float)W * (float)H / (2.0f * M_PI * M_PI));
 
-		// 7) 返回“无穷远处”点
-		return shadingData.x + dir * 1e6f;
+		//return shadingData.x + dir * 1e6f;
+		return sampleImportance(sampler, reflectedColour, pdf);
 	}
+
+	// 评估该方向的光源强度
 	Colour evaluate(const Vec3& wi)
 	{
 		float u = atan2f(wi.z, wi.x);
 		u = (u < 0.0f) ? u + (2.0f * M_PI) : u;
 		u = u / (2.0f * M_PI);
 		float v = acosf(wi.y) / M_PI;
-		return env->sample(u, v);
+		return env->sample(u, v);  // 使用u,v坐标从环境贴图中获取颜色值
 	}
+
 	float PDF(const ShadingData& shadingData, const Vec3& wi)
 	{
 		// Assignment: Update this code to return the correct PDF of luminance weighted importance sampling
@@ -354,4 +347,68 @@ public:
 		}
 		return left;
 	}
+	void buildImportanceSampling()
+	{
+		// 计算边际分布（对于纬度）
+		marginalDist.resize(H);
+		std::vector<float> rowSum(H, 0.0f);
+
+		for (int y = 0; y < H; y++)
+		{
+			float theta = M_PI * ((float)y + 0.5f) / (float)H;
+			float sinT = sinf(theta);
+			for (int x = 0; x < W; x++)
+			{
+				// 获取环境贴图的亮度
+				float lum = env->texels[y * W + x].Lum();
+				rowSum[y] += lum * sinT;  // 累加每行的亮度与sinθ的乘积
+			}
+		}
+
+		// 计算累积分布函数（CDF）
+		for (int y = 0; y < H; y++)
+		{
+			if (rowSum[y] > 1e-8f)
+			{
+				marginalDist[y] = rowSum[y] / rowSum[H - 1]; // 归一化
+			}
+			else
+			{
+				marginalDist[y] = 1.0f;
+			}
+		}
+	}
+	Vec3 sampleImportance(Sampler* sampler, Colour& emittedColour, float& pdf)
+	{
+		// 1) 从边际分布（marginalDist）中采样纬度（theta方向）
+		float r1 = sampler->next();
+		int row = binarySearchSegment(marginalDist.data(), H, r1);
+
+		// 2) 从条件分布（conditionalDist）中采样经度（phi方向）
+		float r2 = sampler->next();
+		int col = binarySearchSegment(&conditionalDist[row * W], W, r2);
+
+		// 3) 使用球面坐标系转换
+		float u = (float)col / (float)W;
+		float v = (float)row / (float)H;
+		float theta = v * M_PI;
+		float phi = u * 2.0f * M_PI;
+
+		float sinT = sinf(theta);
+		float cosT = cosf(theta);
+		Vec3 direction(sinT * cosf(phi), cosT, sinT * sinf(phi));
+
+		// 4) 评估该方向的颜色
+		emittedColour = evaluate(direction);
+
+		// 5) 计算该方向的PDF
+		float pixelLum = env->texels[row * W + col].Lum();
+		float pixelValue = pixelLum * sinT;
+		float localProb = pixelValue / totalEnv;
+		pdf = localProb * ((float)W * (float)H / (2.0f * M_PI * M_PI));
+
+		// 返回该方向
+		return direction;
+	}
+
 };
