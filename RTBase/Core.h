@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Do not change this code!
 
@@ -38,6 +38,23 @@ public:
 		cg = (unsigned char)(g * 255);
 		cb = (unsigned char)(b * 255);
 	}
+	Colour operator-() const {
+		return Colour(-r, -g, -b); // Negate r, g, b components
+	}
+
+	Colour operator-(const float v) const
+	{
+		return Colour(r - v, g - v, b - v);
+	}
+	Colour operator-(const Colour& colour) const
+	{
+		return Colour(r - colour.r, g - colour.g, b - colour.b);
+	}
+	Colour operator*(const float v) const
+	{
+		return Colour(r * v, g * v, b * v);
+	}
+
 	// Additive operators for Colour + float and Colour += float
 	Colour operator+(float v) const
 	{
@@ -68,14 +85,14 @@ public:
 		c.b = b + colour.b;
 		return c;
 	}
-	Colour operator-(const Colour& colour) const
+	/*Colour operator-(const Colour& colour) const
 	{
 		Colour c;
 		c.r = r - colour.r;
 		c.g = g - colour.g;
 		c.b = b - colour.b;
 		return c;
-	}
+	}*/
 	Colour operator*(const Colour& colour) const
 	{
 		Colour c;
@@ -92,14 +109,14 @@ public:
 		c.b = b / colour.b;
 		return c;
 	}
-	Colour operator*(const float v) const
+	/*Colour operator*(const float v) const
 	{
 		Colour c;
 		c.r = r * v;
 		c.g = g * v;
 		c.b = b * v;
 		return c;
-	}
+	}*/
 	Colour operator/(const float v) const
 	{
 		Colour c;
@@ -139,10 +156,25 @@ public:
 		return *this;
 	}
 
+	Colour exp(const Colour& col) const {
+		return Colour(std::exp(col.r), std::exp(col.g), std::exp(col.b));
+	}
 
-	float Lum()
-	{
+	float Lum() const { // Make Lum() const
 		return ((0.2126f * r) + (0.7152f * g) + (0.0722f * b));
+	}
+
+	bool isBlack(float epsilon = 1e-9f) const {
+		return fabsf(r) < epsilon && fabsf(g) < epsilon && fabsf(b) < epsilon;
+	}
+
+	bool isValid() const {
+		return !std::isnan(r) && !std::isnan(g) && !std::isnan(b) &&
+			std::isfinite(r) && std::isfinite(g) && std::isfinite(b);
+	}
+
+	Colour exp() const { // Element-wise exponentiation
+		return Colour(std::exp(r), std::exp(g), std::exp(b));
 	}
 };
 
@@ -159,6 +191,7 @@ inline Colour Lerp(const Colour& a, const Colour& b, float t) {
 	return a * (1.0f - ct) + b * ct;
 
 }
+
 class Vec3
 {
 public:
@@ -315,6 +348,10 @@ inline Vec3 operator*(float scalar, const Vec3& v) {
 	return v * scalar;
 }
 
+std::ostream& operator<<(std::ostream& os, const Vec3& v) {
+	os << "(" << v.x << ", " << v.y << ", " << v.z << ")";
+	return os;
+}
 
 struct Vertex
 {

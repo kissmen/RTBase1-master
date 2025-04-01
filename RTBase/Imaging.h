@@ -158,33 +158,26 @@ public:
 
 	float filter(const float x, const float y) const
 	{
-		// 计算到中心的平方距离 d^2
 		float d2 = x * x + y * y;
 		float r2 = m_radius * m_radius;
 
-		// 若超出截断半径，则返回 0
 		if (d2 > r2)
 			return 0.0f;
 
-		// 核心公式: G(d, radius) = e^{-alpha*d^2} - e^{-alpha*radius^2}
 		float val = std::exp(-m_alpha * d2) - std::exp(-m_alpha * r2);
 
-		// 虽说理论上 val 不应 < 0，但数值误差下可能出现极小负值，做一次 clamp
 		return (val > 0.0f) ? val : 0.0f;
 	}
 
-	/**
-	 * 返回滤镜“半径”的整数部分（用于上层采样时的边界计算）
-	 */
+	
 	int size() const
 	{
-		// 若需要向上取整，则:
 		return static_cast<int>(std::ceil(m_radius));
 	}
 
 private:
-	float m_alpha;   // 高斯衰减系数
-	float m_radius;  // 截断半径
+	float m_alpha;
+	float m_radius;
 };
 
 class MitchellNetravaliFilter : public ImageFilter {
@@ -262,14 +255,26 @@ public:
 		}
 		int idx = (int)(y)*width + (int)(x);
 	}
-	void tonemap(int x, int y, unsigned char& r, unsigned char& g, unsigned char& b, float exposure = 1.0f)
+	void tonemap(int x, int y, unsigned char& r, unsigned char& g, unsigned char& b, float exposure = 0.6f)
 	{
 		// Return a tonemapped pixel at coordinates x, y
-		Colour pixel = film[(y * width) + x] * exposure / (float)SPP;
+		Colour pixel = film[(y * width) + x] / (float)SPP;
 
-		r = std::min(powf(std::max(pixel.r, 0.0f), 1.0f / 2.2f) * 255, 255.0f);
-		g = std::min(powf(std::max(pixel.g, 0.0f), 1.0f / 2.2f) * 255, 255.0f);
-		b = std::min(powf(std::max(pixel.b, 0.0f), 1.0f / 2.2f) * 255, 255.0f);
+		pixel = pixel * exposure;
+
+		pixel.r = pixel.r / (1.0f + pixel.r);
+		pixel.g = pixel.g / (1.0f + pixel.g);
+		pixel.b = pixel.b / (1.0f + pixel.b);
+
+		float gamma = 2.2f;
+		float invGamma = 1.0f / gamma;
+		float rF = powf(std::max(pixel.r, 0.0f), invGamma);
+		float gF = powf(std::max(pixel.g, 0.0f), invGamma);
+		float bF = powf(std::max(pixel.b, 0.0f), invGamma);
+
+		r = (unsigned char)(std::min(rF, 1.0f) * 255.0f);
+		g = (unsigned char)(std::min(gF, 1.0f) * 255.0f);
+		b = (unsigned char)(std::min(bF, 1.0f) * 255.0f);
 	}
 	// Do not change any code below this line
 	void init(int _width, int _height, ImageFilter* _filter)

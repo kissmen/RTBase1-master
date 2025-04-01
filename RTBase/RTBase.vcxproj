@@ -143,6 +143,7 @@
     <ClInclude Include="Sampling.h" />
     <ClInclude Include="Scene.h" />
     <ClInclude Include="SceneLoader.h" />
+    <ClInclude Include="VPL.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp" />

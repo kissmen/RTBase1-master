@@ -25,6 +25,7 @@ public:
 	virtual float totalIntegratedPower() = 0;
 	virtual Vec3 samplePositionFromLight(Sampler* sampler, float& pdf) = 0;
 	virtual Vec3 sampleDirectionFromLight(Sampler* sampler, float& pdf) = 0;
+	BSDF* getBSDF() { return new DiffuseBSDF(); }
 };
 
 class AreaLight : public Light
@@ -32,6 +33,7 @@ class AreaLight : public Light
 public:
 	Triangle* triangle = NULL;
 	Colour emission;
+	Vec3 emittingNormal;
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& emittedColour, float& pdf)
 	{
 		emittedColour = emission;
@@ -39,7 +41,8 @@ public:
 	}
 	Colour evaluate(const Vec3& wi)
 	{
-		if (Dot(wi, triangle->gNormal()) < 0)
+		//if (Dot(wi, triangle->gNormal()) < 0)
+		if (Dot(wi.normalize(), emittingNormal) > EPSILON)
 		{
 			return emission;
 		}
@@ -47,7 +50,19 @@ public:
 	}
 	float PDF(const ShadingData& shadingData, const Vec3& wi)
 	{
-		return 1.0f / triangle->area;
+		// Origin area PDF
+		float pdfArea = 1.0f / triangle->area;
+		// Estimating the location of light source
+		Vec3 center = triangle->centre();
+		// ShadingData.x to centre square
+		float dist2 = (shadingData.x - center).lengthSq();
+		// Cosine of direction of emission from the lamp surface with respect to its normal
+		//float cosTheta = fabs(Dot(wi, triangle->gNormal()));
+		float cosTheta = fabs(Dot(wi, emittingNormal));
+		if (cosTheta < 1e-6f) return 0.0f;
+		// Area PDF convert to stereo angle PDF
+		float pdfSolid = pdfArea * (dist2 / cosTheta);
+		return pdfSolid;
 	}
 	bool isArea()
 	{
@@ -55,7 +70,8 @@ public:
 	}
 	Vec3 normal(const ShadingData& shadingData, const Vec3& wi)
 	{
-		return triangle->gNormal();
+		//return triangle->gNormal();
+		return emittingNormal;
 	}
 	float totalIntegratedPower()
 	{
@@ -65,14 +81,31 @@ public:
 	{
 		return triangle->sample(sampler, pdf);
 	}
+	
 	Vec3 sampleDirectionFromLight(Sampler* sampler, float& pdf)
 	{
 		// Add code to sample a direction from the light
-		Vec3 wi = Vec3(0, 0, 1);
+		/*Vec3 wi = Vec3(0, 0, 1);
 		pdf = 1.0f;
 		Frame frame;
 		frame.fromVector(triangle->gNormal());
-		return frame.toWorld(wi);
+		return frame.toWorld(wi);*/
+		float r1 = sampler->next();
+		float r2 = sampler->next();
+
+		// Hemisphere sample localDir
+		Vec3 localDir = SamplingDistributions::cosineSampleHemisphere(r1, r2);
+
+		// PDF = cos(theta) / PI
+		pdf = SamplingDistributions::cosineHemispherePDF(localDir);
+
+		// Transformation from light normals to world space
+		Frame frame;
+		//frame.fromVector(-triangle->gNormal());
+		//frame.fromVector(triangle->gNormal());
+		frame.fromVector(emittingNormal);
+		// Returns the direction of the converted world
+		return frame.toWorld(localDir);
 	}
 
 };
@@ -132,10 +165,10 @@ class EnvironmentMap : public Light
 {
 public:
 	Texture* env;
-	std::vector<float> marginalDist;   // 大小H，每行的累积分布
-	std::vector<float> conditionalDist; // 大小W*H，每个像素的累积分布
-	float totalEnv;                     // 用于存储贴图总能量 (积分)
-	int W, H;                           // 缓存贴图分辨率
+	std::vector<float> marginalDist;
+	std::vector<float> conditionalDist;
+	float totalEnv;
+	int W, H;
 	EnvironmentMap(Texture* _env)
 	{
 		env = _env;
@@ -148,17 +181,15 @@ public:
 		marginalDist.resize(H);
 		conditionalDist.resize(W * H);
 
-		// 1) 对每个像素计算 "pixelEnergy = lum * sinTheta"
-		//    rowSum[y] 累加每行总和
 		std::vector<float> rowSum(H, 0.0f);
 		for (int y = 0; y < H; y++)
 		{
-			// 计算此行中心对应 theta
+			// theta
 			float theta = M_PI * ((float)y + 0.5f) / (float)H;
 			float sinT = sinf(theta);
 			for (int x = 0; x < W; x++)
 			{
-				// 贴图亮度 (r+g+b 或其他加权)
+				// Map luminance
 				float lum = env->texels[y * W + x].Lum();
 				float val = lum * sinT;
 				conditionalDist[y * W + x] = val;
@@ -166,17 +197,15 @@ public:
 			}
 		}
 
-		// 2) 对每行做前缀和 => conditionalDist[y*W + x] 变成 0..1 CDF
 		for (int y = 0; y < H; y++)
 		{
 			float accum = 0.0f;
 			for (int x = 0; x < W; x++)
 			{
 				accum += conditionalDist[y * W + x];
-				conditionalDist[y * W + x] = accum; // 累加
+				conditionalDist[y * W + x] = accum;
 			}
-			// 现在 accum == rowSum[y]
-			// 归一化
+			// Normalisation
 			if (rowSum[y] > 1e-8f)
 			{
 				for (int x = 0; x < W; x++)
@@ -186,13 +215,10 @@ public:
 			}
 			else
 			{
-				// 若行能量近0，则整行cdf直接置为1.0
 				for (int x = 0; x < W; x++)
 					conditionalDist[y * W + x] = 1.0f;
 			}
 		}
-
-		// 3) 对行Sum做前缀和 => marginalDist[y]
 		float accumRow = 0.0f;
 		for (int y = 0; y < H; y++)
 		{
@@ -200,62 +226,58 @@ public:
 			marginalDist[y] = accumRow;
 		}
 
-		totalEnv = accumRow; // 记录总和
-		// 归一化 [0..1]
-		if (totalEnv < 1e-8f) totalEnv = 1e-8f; // 避免除0
+		totalEnv = accumRow;
+		// (0,1)
+		if (totalEnv < 1e-8f) totalEnv = 1e-8f;
 		for (int y = 0; y < H; y++)
 		{
 			marginalDist[y] /= totalEnv;
 		}
 	}
-	// 采样函数，基于累积分布函数（CDF）采样环境贴图中的一个方向
+	// Sampling function that samples one direction in environment map based on CDF
 	Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
 	{
-		// 1) 从 marginalDist 中采样经度（θ方向）
+		// MarginalDist sampling longitude
 		float r1 = sampler->next();
 		int row = binarySearchSegment(marginalDist.data(), H, r1);
-
-		// 计算该行的CDF范围
-		float cdfBelow = (row == 0) ? 0.0f : marginalDist[row - 1];
-		float rowCDFRange = marginalDist[row] - cdfBelow;
-		float rowCDFLocal = (r1 - cdfBelow) / std::max(rowCDFRange, 1e-8f);
-
-		// 2) 在该行中，采样纬度（φ方向）
+		// Sampling latitude
 		float r2 = sampler->next();
 		int col = binarySearchSegment(&conditionalDist[row * W], W, r2);
-
-		// 3) 转换为球面坐标系
-		float u = ((float)col + 0.5f) / (float)W;
-		float v = ((float)row + 0.5f) / (float)H;
+		// Conversion to spherical coordinate system
+		/*float u = ((float)col + 0.5f) / (float)W;
+		float v = ((float)row + 0.5f) / (float)H;*/
+		float u = (float)col / (float)W;
+		float v = (float)row / (float)H;
 		float theta = v * M_PI;
 		float phi = u * 2.0f * M_PI;
 
-		// 球面坐标转换
+		// Spherical Coordinate Conversion
 		float sinT = sinf(theta);
 		float cosT = cosf(theta);
 		Vec3 dir = Vec3(sinT * cosf(phi), cosT, sinT * sinf(phi));
 
-		// 4) 评估颜色值
+		// Evaluating colour values
 		reflectedColour = evaluate(dir);
 
-		// 5) 计算该方向的PDF
+		// PDF
 		float pixelLum = env->texels[row * W + col].Lum();
 		float pixelValue = pixelLum * sinT;
 		float localProb = pixelValue / totalEnv;
 		pdf = localProb * ((float)W * (float)H / (2.0f * M_PI * M_PI));
 
 		//return shadingData.x + dir * 1e6f;
-		return sampleImportance(sampler, reflectedColour, pdf);
+		// return sampleImportance(sampler, reflectedColour, pdf);
+		return dir;
 	}
 
-	// 评估该方向的光源强度
+	// Intensity of light source in direction
 	Colour evaluate(const Vec3& wi)
 	{
 		float u = atan2f(wi.z, wi.x);
 		u = (u < 0.0f) ? u + (2.0f * M_PI) : u;
 		u = u / (2.0f * M_PI);
 		float v = acosf(wi.y) / M_PI;
-		return env->sample(u, v);  // 使用u,v坐标从环境贴图中获取颜色值
+		return env->sample(u, v);  // Get colour values from the env map using u,v coord
 	}
 
 	float PDF(const ShadingData& shadingData, const Vec3& wi)
@@ -268,10 +290,10 @@ public:
 		float phi = atan2f(wi.z, wi.x);
 		if (phi < 0) phi += 2.0f * M_PI;
 
-		float v = theta / M_PI;        // [0..1]
-		float u = phi / (2.0f * M_PI); // [0..1]
+		float v = theta / M_PI;
+		float u = phi / (2.0f * M_PI);
 
-		// 找对应行 col
+		// Related col
 		int row = (int)floor(v * (float)H);
 		int col = (int)floor(u * (float)W);
 		if (row < 0) row = 0;
@@ -285,7 +307,6 @@ public:
 		float pixelValue = lum * sinT;
 		float localProb = pixelValue / totalEnv;
 
-		// 同样要乘 (W*H)/(2π²)
 		float pdf = localProb * ((float)W * (float)H / (2.0f * M_PI * M_PI));
 		return pdf;
 	}
@@ -314,13 +335,10 @@ public:
 	Vec3 samplePositionFromLight(Sampler* sampler, float& pdf)
 	{
 		// Samples a point on the bounding sphere of the scene. Feel free to improve this.
-		// 任选场景 bounds
 		float r1 = sampler->next();
 		float r2 = sampler->next();
 		Vec3 dir = SamplingDistributions::uniformSampleSphere(r1, r2);
 		Vec3 p = use<SceneBounds>().sceneCentre + dir * use<SceneBounds>().sceneRadius;
-		// pdf = 1 / (4π R^2) 之类
-		// ...
 		pdf = 1.f / (4.f * M_PI * SQ(use<SceneBounds>().sceneRadius));
 		return p;
 	}
@@ -333,8 +351,6 @@ public:
 	}
 	inline int binarySearchSegment(const float* cdf, int size, float r)
 	{
-		// 假设 cdf[size-1] = 1.0 (或近似)
-		// 用标准二分
 		int left = 0;
 		int right = size - 1;
 		while (left < right)
@@ -349,7 +365,6 @@ public:
 	}
 	void buildImportanceSampling()
 	{
-		// 计算边际分布（对于纬度）
 		marginalDist.resize(H);
 		std::vector<float> rowSum(H, 0.0f);
 
@@ -359,18 +374,18 @@ public:
 			float sinT = sinf(theta);
 			for (int x = 0; x < W; x++)
 			{
-				// 获取环境贴图的亮度
+				// Env map luminance
 				float lum = env->texels[y * W + x].Lum();
-				rowSum[y] += lum * sinT;  // 累加每行的亮度与sinθ的乘积
+				rowSum[y] += lum * sinT;
 			}
 		}
 
-		// 计算累积分布函数（CDF）
+		// CDF
 		for (int y = 0; y < H; y++)
 		{
 			if (rowSum[y] > 1e-8f)
 			{
-				marginalDist[y] = rowSum[y] / rowSum[H - 1]; // 归一化
+				marginalDist[y] = rowSum[y] / rowSum[H - 1];
 			}
 			else
 			{
@@ -380,15 +395,15 @@ public:
 	}
 	Vec3 sampleImportance(Sampler* sampler, Colour& emittedColour, float& pdf)
 	{
-		// 1) 从边际分布（marginalDist）中采样纬度（theta方向）
+		// MarginalDist sampling latitude theta
 		float r1 = sampler->next();
 		int row = binarySearchSegment(marginalDist.data(), H, r1);
 
-		// 2) 从条件分布（conditionalDist）中采样经度（phi方向）
+		// ConditionalDist sampling longitude phi dir
 		float r2 = sampler->next();
 		int col = binarySearchSegment(&conditionalDist[row * W], W, r2);
 
-		// 3) 使用球面坐标系转换
+		// Transformation using spherical coordinate system
 		float u = (float)col / (float)W;
 		float v = (float)row / (float)H;
 		float theta = v * M_PI;
@@ -398,16 +413,15 @@ public:
 		float cosT = cosf(theta);
 		Vec3 direction(sinT * cosf(phi), cosT, sinT * sinf(phi));
 
-		// 4) 评估该方向的颜色
+		// Dir colour
 		emittedColour = evaluate(direction);
 
-		// 5) 计算该方向的PDF
+		// Dir PDF
 		float pixelLum = env->texels[row * W + col].Lum();
 		float pixelValue = pixelLum * sinT;
 		float localProb = pixelValue / totalEnv;
 		pdf = localProb * ((float)W * (float)H / (2.0f * M_PI * M_PI));
 
-		// 返回该方向
 		return direction;
 	}
 

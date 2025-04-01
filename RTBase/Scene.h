@@ -6,6 +6,8 @@
 #include "Imaging.h"
 #include "Materials.h"
 #include "Lights.h"
+#include "Scene.h"
+#include "VPL.h"
 
 class Camera
 {
@@ -50,12 +52,15 @@ public:
 		dir = inverseProjectionMatrix.mulPoint(dir);
 		dir = camera.mulVec(dir);
 		dir = dir.normalize();
+		// Print ray direction
+		//std::cout << "Ray Direction: " << dir.x << ", " << dir.y << ", " << dir.z << std::endl;
 		return Ray(origin, dir);
 	}
 	bool projectOntoCamera(const Vec3& p, float& x, float& y)
 	{
 		Vec3 pview = cameraToView.mulPoint(p);
 		Vec3 pproj = projectionMatrix.mulPointAndPerspectiveDivide(pview);
+		std::cout << "Projected Coordinates: (" << pproj.x << ", " << pproj.y << ", " << pproj.z << ")" << std::endl;
 		x = (pproj.x + 1.0f) * 0.5f;
 		y = (pproj.y + 1.0f) * 0.5f;
 		if (x < 0 || x > 1.0f || y < 0 || y > 1.0f)
@@ -75,13 +80,14 @@ public:
 	std::vector<Triangle> triangles;
 	std::vector<BSDF*> materials;
 	std::vector<Light*> lights;
+	std::vector<VPL> vplList;
 	Light* background = NULL;
 	BVHNode* bvh = NULL;
 	Camera camera;
 	AABB bounds;
-	std::vector<float> lightCDF;       // 每个光源的前缀CDF
-	float totalLightPower = 0.0f;      // 所有光源的能量和
-	bool builtLightCDF = false;        // 是否已建立CDF
+	std::vector<float> lightCDF;
+	float totalLightPower = 0.0f;
+	bool builtLightCDF = false;
 
 	void build()
 	{
@@ -89,9 +95,9 @@ public:
 		vector<int> indices;
 		for (int i = 0; i < triangles.size(); ++i) {
 			if (!triangles[i].vertices[0].p.isValid() || !triangles[i].vertices[1].p.isValid() || !triangles[i].vertices[2].p.isValid()) {
-				// 将无效三角形标记为不可用，或者跳过
+
 			}
-			AABB triangleBounds(triangles[i]); // 用三角形来初始化包围盒
+			AABB triangleBounds(triangles[i]);
 
 			// Extend the bounds with the min and max of the AABB
 			bounds.extend(triangleBounds.min);  // Use triangleBounds.min
@@ -112,6 +118,11 @@ public:
 				AreaLight* light = new AreaLight();
 				light->triangle = &triangles[i];
 				light->emission = materials[triangles[i].materialIndex]->emission;
+				//light->emittingNormal = -triangles[i].n;
+				light->emittingNormal = triangles[i].gNormal();
+				std::cout << "Light Triangle ID: " << triangles[i].id
+					<< " gNormal: " << triangles[i].gNormal()
+					<< " Assigned Emitting Normal: " << light->emittingNormal << std::endl;
 				lights.push_back(light);
 			}
 		}
@@ -124,7 +135,7 @@ public:
 				validTriangles.push_back(triangle);
 			}
 		}
-		triangles = validTriangles;  // 替换为有效三角形的列表
+		triangles = validTriangles;
 	}
 	
 
@@ -141,32 +152,30 @@ public:
 		pmf = 1.0f / (float)lights.size();
 		int index = std::min((int)(r1 * lights.size()), (int)(lights.size() - 1));
 		return lights[index];*/
-		// 若还没build，先build
+		static bool cdfBuiltOnce = false;
 		if (!builtLightCDF) {
 			buildLightPowerCDF();
 			builtLightCDF = true;
+			cdfBuiltOnce = true;
 		}
 		if (lights.empty()) {
 			pmf = 1.0f;
+			std::cerr << "[Warning] No lights available in scene! Returning nullptr.\n";
 			return nullptr;
 		}
 
 		float r = sampler->next();
-		// 找到CDF中 >= r 的第一个位置
 		int index = binarySearchLightCDF(r);
-		// 计算 pmf
-		// 先计算这个光源的power
+
 		float power_i = (index == 0) ? (lightCDF[0] * totalLightPower)
 			: ((lightCDF[index] - lightCDF[index - 1]) * totalLightPower);
 		pmf = power_i / totalLightPower;
 
-		// 返回光源
 		return lights[index];
 	}
 	void buildLightPowerCDF()
 	{
 		lightCDF.resize(lights.size());
-		// 累加
 		float accum = 0.0f;
 		for (int i = 0; i < lights.size(); i++) {
 			float pwr = lights[i]->totalIntegratedPower();
@@ -174,13 +183,11 @@ public:
 			lightCDF[i] = accum;
 		}
 		totalLightPower = accum;
-		// 归一化
 		for (int i = 0; i < lights.size(); i++) {
 			lightCDF[i] /= totalLightPower;
 		}
 	}
 
-	// 二分查找
 	int binarySearchLightCDF(float r)
 	{
 		int left = 0;
@@ -194,6 +201,18 @@ public:
 				right = mid;
 		}
 		return left;
+	}
+
+	Light* findLightByTriangleID(int triID) {
+		for (auto* L : lights) {
+			if (L->isArea()) {
+				AreaLight* A = static_cast<AreaLight*>(L);
+				if (A->triangle && A->triangle->id == triID) {
+					return A;
+				}
+			}
+		}
+		return nullptr;
 	}
 
 	// Do not modify any code below this line
@@ -211,9 +230,9 @@ public:
 			materials.push_back(meshMaterials[i]);
 		}
 		background = _background;
-		if (background->totalIntegratedPower() > 0)
+		if (_background->totalIntegratedPower() > 0)
 		{
-			lights.push_back(background);
+			lights.push_back(_background);
 		}
 	}
 	bool visible(const Vec3& p1, const Vec3& p2)
